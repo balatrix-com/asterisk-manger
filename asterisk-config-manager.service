@@ -1,0 +1,18 @@
+[Unit]
+Description=Asterisk Configuration Manager
+After=network.target asterisk.service
+[Service]
+Type=simple
+User=asterisk-config-manager
+Group=asterisk-config-manager
+WorkingDirectory=/opt/asterisk-config-manager
+EnvironmentFile=/etc/asterisk-config-manager.env
+ExecStart=/opt/asterisk-config-manager/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8088 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/asterisk/pjsip.conf /etc/asterisk/extensions.conf /var/backups/asterisk-config-manager /var/log/asterisk-config-manager
+[Install]
+WantedBy=multi-user.target

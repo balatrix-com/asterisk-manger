@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.test-tmp/
+pytest-cache-files-*/
+tests/runtime/
+.venv/
+venv/
+.env
+*.log
+.DS_Store
