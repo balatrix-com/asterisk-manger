@@ -52,3 +52,4 @@ python -m venv .venv
 
 Tests use only temporary/workspace files and never touch `/etc/asterisk`. Rotate the `1234` passwords shown in the supplied configuration. Also correct `rewrite_contact=yes.`; structured editing normalizes it automatically.
 "# asterisk-manger" 
+"# asterisk-manger" 
