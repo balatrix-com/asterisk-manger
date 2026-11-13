@@ -6,19 +6,33 @@ if(dialerForm){
   function drawDialer(data){
     q('dialerState').textContent=data.state;
     q('dialerDetail').textContent=data.detail;
-    q('dialerCurrentNumber').textContent=data.number||'—';
+    q('dialerCurrentCallerId').textContent=data.caller_id||'—';
     q('dialerCurrentServer').textContent=data.server_ip?`${data.server_ip}:${data.server_port}`:'—';
-    q('dialerAttempt').textContent=data.attempt||'—';
+    const rows=q('dialerCallRows');rows.replaceChildren();
+    if(data.calls.length){
+      for(const call of data.calls){
+        const row=document.createElement('tr');
+        for(const value of [call.number,call.state,String(call.attempt||'—'),call.detail]){
+          const cell=document.createElement('td');cell.textContent=value;row.appendChild(cell);
+        }
+        rows.appendChild(row);
+      }
+    }else{
+      const row=document.createElement('tr'),cell=document.createElement('td');
+      cell.colSpan=4;cell.textContent='No test running.';row.appendChild(cell);rows.appendChild(row);
+    }
     q('dialerState').dataset.state=data.state.toLowerCase();
     q('dialerStart').disabled=busy||data.has_target;
     q('dialerStop').disabled=busy||!data.has_target;
-    for(const id of ['dialerNumber','dialerIp','dialerPort'])q(id).disabled=data.has_target;
+    for(const id of ['dialerNumbers','dialerCallerId','dialerIp','dialerPort'])q(id).disabled=data.has_target;
     if(data.has_target){
-      q('dialerNumber').value=data.number||'';
+      q('dialerNumbers').value=(data.numbers||[]).join('\n');
+      q('dialerCallerId').value=data.caller_id||'';
       q('dialerIp').value=data.server_ip||'';
       q('dialerPort').value=data.server_port||5060;
     }else if(hadTarget){
-      q('dialerNumber').value='';q('dialerIp').value='';q('dialerPort').value='5060';
+      q('dialerNumbers').value='';q('dialerCallerId').value='';
+      q('dialerIp').value='';q('dialerPort').value='5060';
     }
     hadTarget=data.has_target;
   }
@@ -30,7 +44,8 @@ if(dialerForm){
     event.preventDefault();if(busy)return;busy=true;q('dialerStart').disabled=true;
     try{
       const result=await api('/api/dialer/start',{method:'POST',body:JSON.stringify({
-        number:q('dialerNumber').value.trim(),server_ip:q('dialerIp').value.trim(),server_port:Number(q('dialerPort').value)
+        numbers:q('dialerNumbers').value.trim(),caller_id:q('dialerCallerId').value.trim(),
+        server_ip:q('dialerIp').value.trim(),server_port:Number(q('dialerPort').value)
       })});
       drawDialer(result);
     }catch(error){alert(error.message,true)}

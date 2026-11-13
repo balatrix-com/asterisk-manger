@@ -1,4 +1,4 @@
-"""In-memory, single-call Asterisk dialer driven by AMI channel events."""
+"""In-memory Asterisk call loops, one active call per destination."""
 
 from __future__ import annotations
 
@@ -18,24 +18,46 @@ ENDPOINT = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 @dataclass(frozen=True)
 class Target:
-    number: str
+    numbers: tuple[str, ...]
+    caller_id: str
     server_ip: str
     server_port: int
 
     @classmethod
     def parse(cls, data: dict) -> "Target":
-        number = str(data.get("number", "")).strip()
+        raw_numbers = data.get("numbers", data.get("number", ""))
+        if isinstance(raw_numbers, str):
+            numbers = tuple(part for part in re.split(r"[\s,;]+", raw_numbers.strip()) if part)
+        elif isinstance(raw_numbers, list):
+            numbers = tuple(str(part).strip() for part in raw_numbers)
+        else:
+            raise ValueError("Enter one or more destination numbers")
+        caller_id = str(data.get("caller_id", "")).strip()
         server_ip = str(data.get("server_ip", "")).strip()
         try:
             address = ipaddress.ip_address(server_ip)
             server_port = int(data.get("server_port"))
         except (TypeError, ValueError) as exc:
             raise ValueError("Enter a valid server IP and port") from exc
-        if not NUMBER.fullmatch(number):
-            raise ValueError("Number must contain 3–20 digits, optionally starting with +")
+        if not 1 <= len(numbers) <= 10:
+            raise ValueError("Enter 1–10 destination numbers")
+        if any(not NUMBER.fullmatch(number) for number in numbers):
+            raise ValueError("Each destination must contain 3–20 digits, optionally starting with +")
+        if len(set(numbers)) != len(numbers):
+            raise ValueError("Remove duplicate destination numbers")
+        if not re.fullmatch(r"[0-9]{10}", caller_id):
+            raise ValueError("Caller ID must be exactly 10 digits")
         if address.version != 4 or not 1 <= server_port <= 65535:
             raise ValueError("Use an IPv4 server and port 1–65535")
-        return cls(number, server_ip, server_port)
+        return cls(numbers, caller_id, server_ip, server_port)
+
+
+@dataclass
+class NumberState:
+    state: str = "Calling"
+    detail: str = "Waiting to dial"
+    attempt: int = 0
+    active_uniqueid: str | None = None
 
 
 class AMIClient:
@@ -107,23 +129,31 @@ class CallDialer:
         self.retry_seconds = retry_seconds
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
-        self.worker: threading.Thread | None = None
+        self.workers: dict[str, threading.Thread] = {}
         self.target: Target | None = None
-        self.state = "Stopped"
-        self.detail = "Ready"
-        self.attempt = 0
-        self.active_uniqueid: str | None = None
+        self.calls: dict[str, NumberState] = {}
 
     def snapshot(self) -> dict:
         with self.lock:
             target = self.target
-            return {"state": self.state, "detail": self.detail,
-                    "running": bool(target is not None and self.worker and self.worker.is_alive() and not self.stop_event.is_set()),
+            calls = [{"number": number, "state": call.state, "detail": call.detail,
+                      "attempt": call.attempt} for number, call in self.calls.items()]
+            if target is None:
+                state, detail = "Stopped", "Ready"
+            elif self.stop_event.is_set():
+                state, detail = "Stopping", "Hanging up test calls"
+            elif any(call.state == "Error" for call in self.calls.values()):
+                state, detail = "Error", "One or more calls need attention"
+            else:
+                state, detail = "Running", f"Monitoring {len(calls)} destination(s)"
+            return {"state": state, "detail": detail,
+                    "running": bool(target is not None and not self.stop_event.is_set()),
                     "has_target": target is not None,
-                    "number": target.number if target else None,
+                    "numbers": list(target.numbers) if target else [],
+                    "caller_id": target.caller_id if target else None,
                     "server_ip": target.server_ip if target else None,
                     "server_port": target.server_port if target else None,
-                    "attempt": self.attempt}
+                    "calls": calls}
 
     def start(self, target: Target) -> dict:
         if not self.settings.ami_username or not self.settings.ami_secret:
@@ -131,61 +161,65 @@ class CallDialer:
         if not ENDPOINT.fullmatch(self.settings.dialer_endpoint):
             raise RuntimeError("DIALER_ENDPOINT is not configured")
         with self.lock:
-            if self.target is not None or self.worker and self.worker.is_alive():
+            if self.target is not None or any(worker.is_alive() for worker in self.workers.values()):
                 raise RuntimeError("A dialer test is already active or stopping")
             self.target = target
             self.stop_event.clear()
-            self.state = "Calling"
-            self.detail = "Starting call"
-            self.attempt = 0
-            self.active_uniqueid = None
-            self.worker = threading.Thread(target=self._run, daemon=True, name="asterisk-dialer")
-            self.worker.start()
+            self.calls = {number: NumberState() for number in target.numbers}
+            self.workers = {
+                number: threading.Thread(target=self._run, args=(number,), daemon=True,
+                                         name=f"asterisk-dialer-{index}")
+                for index, number in enumerate(target.numbers)
+            }
+            for worker in self.workers.values():
+                worker.start()
             return self.snapshot()
 
     def stop(self) -> dict:
         with self.lock:
             self.stop_event.set()
-            worker = self.worker
-            self.state = "Stopping"
-            self.detail = "Hanging up test call"
-        if worker and worker is not threading.current_thread():
-            worker.join(timeout=40)
+            workers = list(self.workers.values())
+        deadline = time.monotonic() + 40
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(timeout=max(0, deadline - time.monotonic()))
         with self.lock:
-            if worker and worker.is_alive():
-                raise RuntimeError("Hangup has not been confirmed; check the Asterisk channel")
-            unique_id = self.active_uniqueid
-        if unique_id:
-            self._recover_hangup(unique_id)
+            if any(worker.is_alive() for worker in workers):
+                raise RuntimeError("Hangup has not been confirmed for every test call")
+            pending = [(number, call.active_uniqueid) for number, call in self.calls.items()
+                       if call.active_uniqueid]
+        for number, unique_id in pending:
+            self._recover_hangup(number, unique_id)
         with self.lock:
             self.target = None
-            self.state = "Stopped"
-            self.detail = "Ready"
-            self.attempt = 0
+            self.calls.clear()
+            self.workers.clear()
             return self.snapshot()
 
-    def _set(self, state: str, detail: str) -> None:
+    def _set(self, number: str, state: str, detail: str) -> None:
         with self.lock:
             if not self.stop_event.is_set():
-                self.state, self.detail = state, detail
+                self.calls[number].state = state
+                self.calls[number].detail = detail
 
-    def _run(self) -> None:
+    def _run(self, number: str) -> None:
         while not self.stop_event.is_set():
             with self.lock:
                 target = self.target
-                self.attempt += 1
-                self.state, self.detail = "Calling", f"Attempt {self.attempt}: dialing"
+                call = self.calls[number]
+                call.attempt += 1
+                call.state, call.detail = "Calling", f"Attempt {call.attempt}: dialing"
             if target is None:
                 break
             try:
-                self._one_call(target)
+                self._one_call(number, target)
             except (OSError, TimeoutError, PermissionError, ConnectionError) as exc:
-                self._set("Error", f"AMI error: {exc}")
+                self._set(number, "Error", f"AMI error: {exc}")
                 break  # Unknown channel state: never risk a duplicate call.
             if not self.stop_event.is_set():
                 self.stop_event.wait(self.retry_seconds)
 
-    def _one_call(self, target: Target) -> None:
+    def _one_call(self, number: str, target: Target) -> None:
         client = AMIClient(self.settings.ami_host, self.settings.ami_port)
         try:
             client.login(self.settings.ami_username, self.settings.ami_secret)
@@ -193,12 +227,13 @@ class CallDialer:
                 return
             action_id = uuid.uuid4().hex
             unique_id = f"dialer-{action_id}"
-            channel = f"PJSIP/{self.settings.dialer_endpoint}/sip:{target.number}@{target.server_ip}:{target.server_port}"
+            channel = f"PJSIP/{self.settings.dialer_endpoint}/sip:{number}@{target.server_ip}:{target.server_port}"
             with self.lock:
-                self.active_uniqueid = unique_id
+                self.calls[number].active_uniqueid = unique_id
             client.send({"Action": "Originate", "ActionID": action_id,
                          "Channel": channel, "ChannelId": unique_id,
-                         "Application": "Echo", "Timeout": "30000", "Async": "true"})
+                         "Application": "Echo", "Timeout": "30000", "Async": "true",
+                         "CallerID": f"Call Test <{target.caller_id}>"})
             channel_name = None
             hangup_sent = False
             deadline = time.monotonic() + 35
@@ -208,26 +243,26 @@ class CallDialer:
                 if message:
                     event = message.get("Event")
                     if message.get("Response") == "Error" and message.get("ActionID") == action_id:
-                        self._set("Disconnected", message.get("Message", "Originate rejected"))
-                        with self.lock:self.active_uniqueid = None
+                        self._set(number, "Disconnected", message.get("Message", "Originate rejected"))
+                        with self.lock:self.calls[number].active_uniqueid = None
                         return
                     if event == "Newchannel" and message.get("Uniqueid") == unique_id:
                         channel_name = message.get("Channel")
                     elif event == "Newstate" and message.get("Uniqueid") == unique_id:
                         if message.get("ChannelStateDesc") == "Up":
                             answered = True
-                            self._set("Connected", "Call answered; waiting for hangup")
+                            self._set(number, "Connected", "Call answered; waiting for hangup")
                         elif message.get("ChannelStateDesc") in {"Ring", "Ringing"}:
-                            self._set("Calling", "Remote side is ringing")
+                            self._set(number, "Calling", "Remote side is ringing")
                     elif event == "OriginateResponse" and message.get("ActionID") == action_id:
                         if message.get("Response") == "Failure":
-                            self._set("Disconnected", "Call was rejected or unanswered")
+                            self._set(number, "Disconnected", "Call was rejected or unanswered")
                             if not channel_name:
-                                with self.lock:self.active_uniqueid = None
+                                with self.lock:self.calls[number].active_uniqueid = None
                                 return
                     elif event == "Hangup" and message.get("Uniqueid") == unique_id:
-                        self._set("Disconnected", "Call ended")
-                        with self.lock:self.active_uniqueid = None
+                        self._set(number, "Disconnected", "Call ended")
+                        with self.lock:self.calls[number].active_uniqueid = None
                         return
                 if self.stop_event.is_set() and channel_name and not hangup_sent:
                     client.send({"Action": "Hangup", "Channel": channel_name})
@@ -238,7 +273,7 @@ class CallDialer:
         finally:
             client.close()
 
-    def _recover_hangup(self, unique_id: str) -> None:
+    def _recover_hangup(self, number: str, unique_id: str) -> None:
         """Find the exact test channel after an AMI disconnect, then hang it up."""
         client = AMIClient(self.settings.ami_host, self.settings.ami_port)
         try:
@@ -267,6 +302,6 @@ class CallDialer:
                         break
                 else:
                     raise TimeoutError("Could not confirm test call hangup")
-            with self.lock:self.active_uniqueid = None
+            with self.lock:self.calls[number].active_uniqueid = None
         finally:
             client.close()

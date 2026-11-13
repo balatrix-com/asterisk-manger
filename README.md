@@ -11,11 +11,11 @@ FastAPI application for managing `/etc/asterisk/pjsip.conf` and `/etc/asterisk/e
 - Argon2 login, expiring secure sessions, CSRF protection, audit log
 - Fixed allowlisted Asterisk CLI commands; no arbitrary paths, commands, or shell interpolation
 - Five-second external-file monitoring that preserves unsaved browser edits
-- Call dialer tab that originates one Asterisk call at a time, redials after hangup, and clears its target on Stop
+- Call dialer tab for 1–10 numbers, each with one active call, independent redial after hangup, and a 10 digit caller ID
 
 ## Asterisk call dialer setup
 
-The Call dialer tab uses Asterisk AMI over localhost. It does not use SIPp. The entered number and SIP target are held only in application memory and are omitted from the audit log. Use one Uvicorn worker; multiple workers would have separate call state.
+The Call dialer tab uses Asterisk AMI over localhost. It does not use SIPp. Enter 1–10 distinct destination numbers (one per line or comma separated), a 10 digit caller ID, and one SIP server IP and port. Each number runs in its own call loop and is redialed only after its previous call ends. Stop hangs up all test calls. Entered numbers, caller ID, and SIP target are held only in application memory and are omitted from the audit log. Use one Uvicorn worker; multiple workers would have separate call state.
 
 Enable AMI on `127.0.0.1:5038` in `/etc/asterisk/manager.conf`, keeping any existing AMI settings. Add a dedicated account with a long random secret:
 
@@ -50,7 +50,7 @@ allow=alaw
 direct_media=no
 ```
 
-Use an existing outbound endpoint instead when the target requires specific caller identity, codecs, or authentication. Asterisk's existing UDP transport sends from its bound SIP port, which is 5060 on the server shown in this setup. The dialer uses AMI `Originate` with `Application: Echo`, watches `Newstate` and `Hangup`, and uses `Hangup` on Stop. If AMI connectivity is lost while a call may still be active, automatic redial stops to prevent a duplicate call; Stop reconnects and checks the exact channel before clearing the target.
+Use an existing outbound endpoint instead when the target requires specific caller identity, codecs, or authentication. Asterisk's existing UDP transport sends from its bound SIP port, which is 5060 on the server shown in this setup. The dialer sends the entered caller ID in AMI's `Originate` action; the endpoint or provider may still override the identity in the outbound SIP INVITE. The dialer uses `Application: Echo`, watches `Newstate` and `Hangup`, and uses `Hangup` on Stop. If AMI connectivity is lost while a call may still be active, automatic redial stops for that number to prevent a duplicate call; Stop reconnects and checks its exact channel before clearing the target.
 
 After configuring AMI and the endpoint:
 
