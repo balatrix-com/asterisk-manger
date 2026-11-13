@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     admin_username:str='admin'; admin_password_hash:str=''; session_ttl_seconds:int=1800
     file_owner:str='asterisk'; file_group:str='asterisk'; file_mode:str='0640'
     audit_log_path:Path=Path('/var/log/asterisk-config-manager/audit.jsonl')
+    ami_host:str='127.0.0.1'
+    ami_port:int=5038
+    ami_username:str=''
+    ami_secret:str=''
+    dialer_endpoint:str=''
     def config_path(self,name):
         if name=='pjsip': return self.pjsip_config_path
         if name=='extensions': return self.extensions_config_path

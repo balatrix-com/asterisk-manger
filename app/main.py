@@ -15,9 +15,15 @@ from app.services.file_manager import FileManager,VersionConflict
 from app.services.backup_manager import BackupManager
 from app.services.asterisk_manager import AsteriskManager
 from app.services.audit import AuditLog
+from app.services.call_dialer import CallDialer,Target
 BASE=Path(__file__).parent;s=get_settings();app=FastAPI(title='Asterisk Config Manager',docs_url=None,redoc_url=None)
 app.add_middleware(SessionMiddleware,secret_key=s.secret_key,max_age=s.session_ttl_seconds,https_only=True,same_site='strict');app.mount('/static',StaticFiles(directory=BASE/'static'),name='static');templates=Jinja2Templates(directory=BASE/'templates')
 files=FileManager(s);backups=BackupManager(s);asterisk=AsteriskManager(s);audit=AuditLog(s.audit_log_path);state={'last_reload':None,'last_reload_ok':None,'last_reload_output':''}
+dialer=CallDialer(s)
+@app.on_event('shutdown')
+def stop_dialer_on_shutdown():
+    try:dialer.stop()
+    except (RuntimeError,OSError,TimeoutError,PermissionError,ConnectionError):pass
 @app.exception_handler(VersionConflict)
 async def conflict(_,e):return JSONResponse({'detail':str(e)},409)
 @app.exception_handler(ValueError)
@@ -90,3 +96,19 @@ def backup_list(user=Depends(require_user)):return backups.list()
 def backup_get(bid:str,user=Depends(require_user)):name=bid.split('-')[0];return {'content':backups.content(bid),'diff':backups.diff(bid,files.read(name)['content'])}
 @app.post('/api/backups/{bid}/restore')
 def backup_restore(bid:str,request:Request,user=Depends(require_user)):require_csrf(request);name=bid.split('-')[0];c=files.read(name);return commit(name,backups.content(bid),c['version'],user)
+@app.get('/api/dialer/status')
+def dialer_status(user=Depends(require_user)):return dialer.snapshot()
+@app.post('/api/dialer/start')
+def dialer_start(data:dict,request:Request,user=Depends(require_user)):
+    require_csrf(request)
+    try:result=dialer.start(Target.parse(data))
+    except RuntimeError as exc:raise HTTPException(409,str(exc)) from exc
+    audit.write(user,'dialer-start')
+    return result
+@app.post('/api/dialer/stop')
+def dialer_stop(request:Request,user=Depends(require_user)):
+    require_csrf(request)
+    try:result=dialer.stop()
+    except (RuntimeError,OSError,TimeoutError,PermissionError,ConnectionError) as exc:raise HTTPException(503,str(exc)) from exc
+    audit.write(user,'dialer-stop')
+    return result
