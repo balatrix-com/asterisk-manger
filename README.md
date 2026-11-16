@@ -11,7 +11,7 @@ FastAPI application for managing `/etc/asterisk/pjsip.conf` and `/etc/asterisk/e
 - Argon2 login, expiring secure sessions, CSRF protection, audit log
 - Fixed allowlisted Asterisk CLI commands; no arbitrary paths, commands, or shell interpolation
 - Five-second external-file monitoring that preserves unsaved browser edits
-- Call dialer tab for 1–10 numbers, each with one active call, independent redial after hangup, and a 10 digit caller ID
+- Call dialer tab for 1–10 numbers, each with one active call, independent redial after hangup, a 10 digit caller ID, and an Echo or continuous audio mode
 
 ## Asterisk call dialer setup
 
@@ -50,7 +50,16 @@ allow=alaw
 direct_media=no
 ```
 
-Use an existing outbound endpoint instead when the target requires specific caller identity, codecs, or authentication. Asterisk's existing UDP transport sends from its bound SIP port, which is 5060 on the server shown in this setup. The dialer sends the entered caller ID in AMI's `Originate` action; the endpoint or provider may still override the identity in the outbound SIP INVITE. The dialer uses `Application: Echo`, watches `Newstate` and `Hangup`, and uses `Hangup` on Stop. If AMI connectivity is lost while a call may still be active, automatic redial stops for that number to prevent a duplicate call; Stop reconnects and checks its exact channel before clearing the target.
+Use an existing outbound endpoint instead when the target requires specific caller identity, codecs, or authentication. Asterisk's existing UDP transport sends from its bound SIP port, which is 5060 on the server shown in this setup. The dialer sends the entered caller ID in AMI's `Originate` action; the endpoint or provider may still override the identity in the outbound SIP INVITE. The dialer watches `Newstate` and `Hangup`, and uses `Hangup` on Stop. If AMI connectivity is lost while a call may still be active, automatic redial stops for that number to prevent a duplicate call; Stop reconnects and checks its exact channel before clearing the target.
+
+For media tests, select **Send test audio continuously**. Once the far end answers, the AMI Originate runs `MusicOnHold(default)` on that call. Asterisk sends the default hold music until the call ends. All destinations use the same media mode for a test run. Confirm the Asterisk `res_musiconhold` module is loaded and the `default` music class has playable files:
+
+```bash
+sudo asterisk -rx 'module show like res_musiconhold'
+sudo asterisk -rx 'moh show classes'
+```
+
+If `default` is absent, configure it in Asterisk's `musiconhold.conf` and install audio files in its configured directory before testing. A connected status means SIP answered; it does not prove RTP reached the far end. Listen at the receiving endpoint or inspect RTP at both ends to verify audio delivery. **Echo audio sent by the remote side** runs `Echo()` instead, returning media received from the far end. Use it with a remote endpoint that sends audio to check the return path. A single call cannot run both applications simultaneously.
 
 After configuring AMI and the endpoint:
 

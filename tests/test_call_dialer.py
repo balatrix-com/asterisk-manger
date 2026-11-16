@@ -15,11 +15,15 @@ def test_target_validation():
     valid={'numbers':'8000123951\n8000303030','caller_id':'1234567890',
            'server_ip':'91.99.251.58','server_port':5060}
     assert Target.parse(valid).numbers==('8000123951','8000303030')
+    assert Target.parse({**valid,'media_mode':'music'}).media_mode=='music'
     for bad in ({**valid,'numbers':'1'},
                 {**valid,'numbers':'8000123951\n8000123951'},
                 {**valid,'caller_id':'1234'},
                 {**valid,'server_ip':'invalid'},
-                {**valid,'server_port':0}):
+                {**valid,'server_port':0},
+                {**valid,'media_mode':'Playback'},
+                {**valid,'media_mode':None},
+                {**valid,'media_mode':['music']}):
         with pytest.raises(ValueError):Target.parse(bad)
 
 
@@ -60,6 +64,17 @@ def test_single_call_waits_for_hangup_and_clears_channel_id():
     assert dialer.calls['8000123951'].state=='Disconnected'
     assert states==['Connected','Disconnected']
     assert FakeAMI.instance.closed
+
+
+def test_music_mode_sends_continuous_audio_application():
+    dialer=CallDialer(SETTINGS)
+    target=Target(('8000123951',),'1234567890','91.99.251.58',5060,'music')
+    dialer.calls={'8000123951':NumberState()}
+    with patch('app.services.call_dialer.AMIClient',FakeAMI):dialer._one_call('8000123951',target)
+    sent=FakeAMI.instance.sent[0]
+    assert sent['Application']=='MusicOnHold'
+    assert sent['Data']=='default'
+    assert dialer.snapshot()['calls'][0]['state']=='Disconnected'
 
 
 def test_start_refuses_existing_target_even_after_worker_stopped():

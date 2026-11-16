@@ -22,6 +22,7 @@ class Target:
     caller_id: str
     server_ip: str
     server_port: int
+    media_mode: str = "echo"
 
     @classmethod
     def parse(cls, data: dict) -> "Target":
@@ -33,6 +34,7 @@ class Target:
         else:
             raise ValueError("Enter one or more destination numbers")
         caller_id = str(data.get("caller_id", "")).strip()
+        media_mode = data.get("media_mode", "echo")
         server_ip = str(data.get("server_ip", "")).strip()
         try:
             address = ipaddress.ip_address(server_ip)
@@ -47,9 +49,11 @@ class Target:
             raise ValueError("Remove duplicate destination numbers")
         if not re.fullmatch(r"[0-9]{10}", caller_id):
             raise ValueError("Caller ID must be exactly 10 digits")
+        if not isinstance(media_mode, str) or media_mode not in {"echo", "music"}:
+            raise ValueError("Choose Echo or Send test audio for media mode")
         if address.version != 4 or not 1 <= server_port <= 65535:
             raise ValueError("Use an IPv4 server and port 1–65535")
-        return cls(numbers, caller_id, server_ip, server_port)
+        return cls(numbers, caller_id, server_ip, server_port, media_mode)
 
 
 @dataclass
@@ -153,6 +157,7 @@ class CallDialer:
                     "caller_id": target.caller_id if target else None,
                     "server_ip": target.server_ip if target else None,
                     "server_port": target.server_port if target else None,
+                    "media_mode": target.media_mode if target else None,
                     "calls": calls}
 
     def start(self, target: Target) -> dict:
@@ -230,10 +235,14 @@ class CallDialer:
             channel = f"PJSIP/{self.settings.dialer_endpoint}/sip:{number}@{target.server_ip}:{target.server_port}"
             with self.lock:
                 self.calls[number].active_uniqueid = unique_id
-            client.send({"Action": "Originate", "ActionID": action_id,
+            originate = {"Action": "Originate", "ActionID": action_id,
                          "Channel": channel, "ChannelId": unique_id,
-                         "Application": "Echo", "Timeout": "30000", "Async": "true",
-                         "CallerID": f"Call Test <{target.caller_id}>"})
+                         "Application": "MusicOnHold" if target.media_mode == "music" else "Echo",
+                         "Timeout": "30000", "Async": "true",
+                         "CallerID": f"Call Test <{target.caller_id}>"}
+            if target.media_mode == "music":
+                originate["Data"] = "default"
+            client.send(originate)
             channel_name = None
             hangup_sent = False
             deadline = time.monotonic() + 35
@@ -251,7 +260,9 @@ class CallDialer:
                     elif event == "Newstate" and message.get("Uniqueid") == unique_id:
                         if message.get("ChannelStateDesc") == "Up":
                             answered = True
-                            self._set(number, "Connected", "Call answered; waiting for hangup")
+                            detail = ("Call answered; sending hold music" if target.media_mode == "music"
+                                      else "Call answered; echoing received audio")
+                            self._set(number, "Connected", detail)
                         elif message.get("ChannelStateDesc") in {"Ring", "Ringing"}:
                             self._set(number, "Calling", "Remote side is ringing")
                     elif event == "OriginateResponse" and message.get("ActionID") == action_id:

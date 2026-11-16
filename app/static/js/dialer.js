@@ -8,6 +8,7 @@ if(dialerForm){
     q('dialerDetail').textContent=data.detail;
     q('dialerCurrentCallerId').textContent=data.caller_id||'—';
     q('dialerCurrentServer').textContent=data.server_ip?`${data.server_ip}:${data.server_port}`:'—';
+    q('dialerCurrentMedia').textContent=data.media_mode==='music'?'Send test audio':data.media_mode==='echo'?'Echo received audio':'—';
     const rows=q('dialerCallRows');rows.replaceChildren();
     if(data.calls.length){
       for(const call of data.calls){
@@ -24,15 +25,16 @@ if(dialerForm){
     q('dialerState').dataset.state=data.state.toLowerCase();
     q('dialerStart').disabled=busy||data.has_target;
     q('dialerStop').disabled=busy||!data.has_target;
-    for(const id of ['dialerNumbers','dialerCallerId','dialerIp','dialerPort'])q(id).disabled=data.has_target;
+    for(const id of ['dialerNumbers','dialerCallerId','dialerIp','dialerPort','dialerMediaMode'])q(id).disabled=data.has_target;
     if(data.has_target){
       q('dialerNumbers').value=(data.numbers||[]).join('\n');
       q('dialerCallerId').value=data.caller_id||'';
       q('dialerIp').value=data.server_ip||'';
       q('dialerPort').value=data.server_port||5060;
+      q('dialerMediaMode').value=data.media_mode||'echo';
     }else if(hadTarget){
       q('dialerNumbers').value='';q('dialerCallerId').value='';
-      q('dialerIp').value='';q('dialerPort').value='5060';
+      q('dialerIp').value='';q('dialerPort').value='5060';q('dialerMediaMode').value='echo';
     }
     hadTarget=data.has_target;
   }
@@ -45,7 +47,8 @@ if(dialerForm){
     try{
       const result=await api('/api/dialer/start',{method:'POST',body:JSON.stringify({
         numbers:q('dialerNumbers').value.trim(),caller_id:q('dialerCallerId').value.trim(),
-        server_ip:q('dialerIp').value.trim(),server_port:Number(q('dialerPort').value)
+        server_ip:q('dialerIp').value.trim(),server_port:Number(q('dialerPort').value),
+        media_mode:q('dialerMediaMode').value
       })});
       drawDialer(result);
     }catch(error){alert(error.message,true)}
